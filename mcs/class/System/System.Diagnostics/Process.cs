@@ -706,7 +706,8 @@ namespace System.Diagnostics {
 		[MonitoringDescription ("The number of threads of this process.")]
 		public ProcessThreadCollection Threads {
 			get {
-				return ProcessThreadCollection.GetEmpty ();
+				int error;
+				return ProcessThreadCollection.GetEmpty ( (int)GetProcessData (pid, 0, out error) );
 			}
 		}
 

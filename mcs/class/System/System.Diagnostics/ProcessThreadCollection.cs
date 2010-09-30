@@ -59,9 +59,14 @@ namespace System.Diagnostics
 		{
 		}
 
-		internal static ProcessThreadCollection GetEmpty ()
+		internal static ProcessThreadCollection GetEmpty ( int numThreads )
 		{
-			return new ProcessThreadCollection ();
+			ProcessThreadCollection ret = new ProcessThreadCollection ();
+            while ( numThreads > 0 ) {
+                ret.Add ( null );
+                numThreads--;
+            }
+            return ret;
 		}
 		
 		public ProcessThreadCollection(ProcessThread[] processThreads) 
