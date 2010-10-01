@@ -99,6 +99,7 @@ namespace System.Web
 		internal bool use_chunked;
 		
 		bool closed;
+		bool completed;
 		internal bool suppress_content;
 
 		//
@@ -284,15 +285,14 @@ namespace System.Web
 
 		public Stream Filter {
 			get {
-				if (WorkerRequest == null || output_stream == null)
+				if (WorkerRequest == null)
 					return null;
-				
+
 				return output_stream.Filter;
 			}
 
 			set {
-				if (output_stream != null)
-					output_stream.Filter = value;
+				output_stream.Filter = value;
 			}
 		}
 
@@ -572,14 +572,12 @@ namespace System.Web
 
 		public void BinaryWrite (byte [] buffer)
 		{
-			if (output_stream != null)
-				output_stream.Write (buffer, 0, buffer.Length);
+			output_stream.Write (buffer, 0, buffer.Length);
 		}
 
 		internal void BinaryWrite (byte [] buffer, int start, int len)
 		{
-			if (output_stream != null)
-				output_stream.Write (buffer, start, len);
+			output_stream.Write (buffer, start, len);
 		}
 
 		public void Clear ()
@@ -589,8 +587,7 @@ namespace System.Web
 
 		public void ClearContent ()
 		{
-			if (output_stream != null)
-				output_stream.Clear ();
+			output_stream.Clear ();
 			content_length = -1;
 		}
 
@@ -684,8 +681,7 @@ namespace System.Web
 					// If we are buffering and this is the last flush, not a middle-flush,
 					// we know the content-length.
 					//
-					if (output_stream != null)
-						content_length = output_stream.total;
+					content_length = output_stream.total;
 					write_headers.Add (HttpWorkerRequest.GetKnownResponseHeaderName (HttpWorkerRequest.HeaderContentLength),
 							   content_length.ToString (Helpers.InvariantCulture));
 				} else {
@@ -800,12 +796,15 @@ namespace System.Web
 
 		internal void DoFilter (bool close)
 		{
-			if (output_stream != null && output_stream.HaveFilter && context != null && context.Error == null)
+			if (output_stream.HaveFilter && context != null && context.Error == null)
 				output_stream.ApplyFilter (close);
 		}
 
 		internal void Flush (bool final_flush)
 		{
+			if (completed)
+				throw new HttpException ("Server cannot flush a completed response");
+			
 			DoFilter (final_flush);
 			if (!headers_sent){
 				if (final_flush || status_code != 200)
@@ -817,11 +816,13 @@ namespace System.Web
 				if (!headers_sent)
 					WriteHeaders (true);
 				output_stream.Clear ();
-				if (WorkerRequest != null && output_stream != null)
+				if (WorkerRequest != null)
 					output_stream.Flush (WorkerRequest, true); // ignore final_flush here.
+				completed = true;
 				return;
 			}
-
+			completed = final_flush;
+			
 			if (!headers_sent)
 				WriteHeaders (final_flush);
 
@@ -834,7 +835,7 @@ namespace System.Web
 			if (IsCached)
 				cached_response.SetData (output_stream.GetData ());
 
-			if (WorkerRequest != null && output_stream != null)
+			if (WorkerRequest != null)
 				output_stream.Flush (WorkerRequest, final_flush);
 		}
 
@@ -1078,9 +1079,6 @@ namespace System.Web
 
 		internal void WriteFile (FileStream fs, long offset, long size)
 		{
-			if (output_stream == null)
-				return;
-			
 			byte [] buffer = new byte [32*1024];
 
 			if (offset != 0)
@@ -1109,14 +1107,12 @@ namespace System.Web
 					WriteFile (fs, 0, fs.Length);
 			} else {
 				FileInfo fi = new FileInfo (filename);
-				if (output_stream != null)
-					output_stream.WriteFile (filename, 0, fi.Length);
+				output_stream.WriteFile (filename, 0, fi.Length);
 			}
 			if (buffer)
 				return;
 
-			if (output_stream != null)
-				output_stream.ApplyFilter (false);
+			output_stream.ApplyFilter (false);
 			Flush ();
 		}
 
@@ -1142,8 +1138,7 @@ namespace System.Web
 
 			if (buffer)
 				return;
-			if (output_stream != null)
-				output_stream.ApplyFilter (false);
+			output_stream.ApplyFilter (false);
 			Flush ();
 		}
 #endif
@@ -1166,8 +1161,7 @@ namespace System.Web
 			if (buffer)
 				return;
 
-			if (output_stream != null)
-				output_stream.ApplyFilter (false);
+			output_stream.ApplyFilter (false);
 			Flush ();
 		}
 
@@ -1214,21 +1208,15 @@ namespace System.Web
 		{
 			FileInfo fi = new FileInfo (filename);
 			using (Stream s = fi.OpenRead ()); // Just check if we can read.
-			if (output_stream != null) {
-				output_stream.WriteFile (filename, 0, fi.Length);
-				output_stream.ApplyFilter (final_flush);
-			}
-			
+			output_stream.WriteFile (filename, 0, fi.Length);
+			output_stream.ApplyFilter (final_flush);
 			Flush (final_flush);
 		}
 
 		public void TransmitFile (string filename, long offset, long length)
 		{
-			if (output_stream != null) {
-				output_stream.WriteFile (filename, offset, length);
-				output_stream.ApplyFilter (false);
-			}
-			
+			output_stream.WriteFile (filename, offset, length);
+			output_stream.ApplyFilter (false);
 			Flush (false);
 		}
 		
@@ -1247,18 +1235,15 @@ namespace System.Web
 				TransmitFile (HostingEnvironment.MapPath (vf.VirtualPath), final_flush);
 				return;
 			}
-
+			
 			byte[] buf = new byte [bufLen];
 			using (Stream s = vf.Open ()) {
 				int readBytes;
-				if (output_stream != null) {
-					while ((readBytes = s.Read (buf, 0, bufLen)) > 0) {
-						output_stream.Write (buf, 0, readBytes);
-						output_stream.ApplyFilter (final_flush);
-						Flush (false);
-					}
+				while ((readBytes = s.Read (buf, 0, bufLen)) > 0) {
+					output_stream.Write (buf, 0, readBytes);
+					output_stream.ApplyFilter (final_flush);
+					Flush (false);
 				}
-				
 				if (final_flush)
 					Flush (true);
 			}
@@ -1337,18 +1322,17 @@ namespace System.Web
 
 		internal int GetOutputByteCount ()
 		{
-			if (output_stream != null)
-				return output_stream.GetTotalLength ();
-			else
-				return -1;
+			return output_stream.GetTotalLength ();
 		}
 
 		internal void ReleaseResources ()
 		{
-			if (output_stream != null) {
-				output_stream.ReleaseResources (true);
-				output_stream = null;
-			}
+			if (completed)
+				return;
+			
+			output_stream.ReleaseResources (true);
+			Close ();
+			completed = true;
 		}
 	}
 
