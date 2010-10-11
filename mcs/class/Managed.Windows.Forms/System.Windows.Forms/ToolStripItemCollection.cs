@@ -212,12 +212,12 @@ namespace System.Windows.Forms
 			foreach (ToolStripItem tsi in this) {
 				if (String.Compare (tsi.Name, key, true) == 0) {
 					list.Add (tsi);
-
-					if (searchAllChildren) {
-						// TODO: tsi does not have an items property yet..
-					}
-				}
-			}
+                }    
+                
+                if (searchAllChildren && tsi is ToolStripDropDownItem) {
+                    list.AddRange ( (tsi as ToolStripDropDownItem).DropDownItems.Find ( key, searchAllChildren ) );
+                }
+            }
 
 			return list.ToArray ();
 		}
