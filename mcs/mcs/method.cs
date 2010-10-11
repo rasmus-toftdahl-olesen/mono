@@ -361,7 +361,7 @@ namespace Mono.CSharp {
 			ms.returnType = inflator.Inflate (returnType);
 			ms.parameters = parameters.Inflate (inflator);
 			if (IsGeneric)
-				ms.constraints = TypeParameterSpec.InflateConstraints (inflator, GenericDefinition.TypeParameters);
+				ms.constraints = TypeParameterSpec.InflateConstraints (inflator, Constraints);
 
 			return ms;
 		}
@@ -769,7 +769,7 @@ namespace Mono.CSharp {
 			       FullNamedExpression return_type, Modifiers mod,
 			       MemberName name, ParametersCompiled parameters, Attributes attrs)
 			: base (parent, generic, return_type, mod,
-				parent.PartialContainer.Kind == MemberKind.Interface ? AllowedModifiersClass :
+				parent.PartialContainer.Kind == MemberKind.Interface ? AllowedModifiersInterface :
 				parent.PartialContainer.Kind == MemberKind.Struct ? AllowedModifiersStruct :
 				AllowedModifiersClass,
 				name, attrs, parameters)

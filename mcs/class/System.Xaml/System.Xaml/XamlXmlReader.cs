@@ -31,7 +31,6 @@ using Pair = System.Collections.Generic.KeyValuePair<System.Xaml.XamlMember,stri
 
 namespace System.Xaml
 {
-	// FIXME: is GetObject supported by this reader?
 	public class XamlXmlReader : XamlReader, IXamlLineInfo
 	{
 		#region constructors
@@ -147,11 +146,14 @@ namespace System.Xaml
 		object current;
 		bool inside_object_not_member, is_empty_object, is_empty_member;
 		Stack<XamlType> types = new Stack<XamlType> ();
+		Stack<XamlMember> members = new Stack<XamlMember> ();
 		XamlMember current_member;
 
-		List<Pair> stored_members = new List<Pair> ();
 		IEnumerator<Pair> stored_member_enumerator;
 		IXamlNamespaceResolver xaml_namespace_resolver;
+
+		// This is used for things like collection Items.
+		Dictionary<int,Stack<XamlMember>> inecting_members = new Dictionary<int,Stack<XamlMember>> ();
 
 		public bool HasLineInfo {
 			get { return line_info != null && line_info.HasLineInfo (); }
@@ -200,7 +202,7 @@ namespace System.Xaml
 				return false;
 
 			// check this before is_empty_* so that they aren't ignored.
-			if (MoveToNextAttributeMember ())
+			if (MoveToNextStoredMember ())
 				return true;
 
 			if (is_empty_object) {
@@ -238,27 +240,78 @@ namespace System.Xaml
 						return true;
 				r.MoveToElement ();
 				
-				if (inside_object_not_member)
-					ReadStartMember ();
-				else
-					ReadStartType ();
+				if (inside_object_not_member) {
+					if (!ReadExtraStartMember ())
+						ReadStartMember ();
+				} else {
+					if (current_member != null && current_member.IsReadOnly) {
+						if (current_member.Type.IsCollection)
+							SetGetObject ();
+						else
+							throw new XamlParseException (String.Format ("Read-only member '{0}' showed up in the source XML, and the xml contains element content that cannot be read.", current_member.Name)) { LineNumber = this.LineNumber, LinePosition = this.LinePosition };
+					}
+					else
+						ReadStartType ();
+				}
 				return true;
 
 			case XmlNodeType.EndElement:
 
 				// could be: EndObject, EndMember
-				if (inside_object_not_member)
-					ReadEndType ();
-				else
-					ReadEndMember ();
+				if (inside_object_not_member) {
+					var xm = members.Count > 0 ? members.Peek () : null;
+					if (xm != null && xm.IsReadOnly && xm.Type.IsCollection)
+						SetEndOfObject ();
+					else
+						ReadEndType ();
+				}
+				else {
+					if (!ReadExtraEndMember ())
+						ReadEndMember ();
+				}
 				return true;
 
 			default:
 
-				// could be: Value
+				// could be: normal property Value (Initialization and ContentProperty are handled at ReadStartType()).
 				ReadValue ();
 				return true;
 			}
+		}
+
+		// returns an optional member without xml node.
+		XamlMember GetExtraMember (XamlType xt)
+		{
+			if (xt == XamlLanguage.Array)
+				return xt.GetMember ("Items");
+			if (xt.IsCollection)
+				return XamlLanguage.Items;
+			return null;
+		}
+
+		bool ReadExtraStartMember ()
+		{
+			var xm = GetExtraMember (types.Peek ());
+			if (xm != null) {
+				inside_object_not_member = false;
+				current = current_member = xm;
+				members.Push (xm);
+				node_type = XamlNodeType.StartMember;
+				return true;
+			}
+			return false;
+		}
+
+		bool ReadExtraEndMember ()
+		{
+			var xm = GetExtraMember (types.Peek ());
+			if (xm != null) {
+				inside_object_not_member = true;
+				current_member = members.Pop ();
+				node_type = XamlNodeType.EndMember;
+				return true;
+			}
+			return false;
 		}
 
 		bool CheckNextNamespace ()
@@ -278,7 +331,33 @@ namespace System.Xaml
 			string name = r.LocalName;
 			string ns = r.NamespaceURI;
 			string typeArgNames = null;
-			var atts = ProcessAttributes ();
+			var members = new List<Pair> ();
+			var atts = ProcessAttributes (members);
+
+			// check TypeArguments to resolve Type, and remove them from the list. They don't appear as a node.
+			var l = new List<Pair> ();
+			foreach (var p in members) {
+				if (p.Key == XamlLanguage.TypeArguments) {
+					typeArgNames = p.Value;
+					l.Add (p);
+					break;
+				}
+			}
+			foreach (var p in l)
+				members.Remove (p);
+
+			XamlType xt;
+			IList<XamlTypeName> typeArgs = typeArgNames == null ? null : XamlTypeName.ParseList (typeArgNames, xaml_namespace_resolver);
+			Type rtype = XamlLanguage.ResolveXamlTypeName (ns, name, typeArgs, xaml_namespace_resolver);
+			if (rtype != null)
+				xt = sctx.GetXamlType (rtype);
+			else
+				xt = sctx.GetXamlType (new XamlTypeName (ns, name, typeArgs));
+			if (xt == null)
+				// creates name-only XamlType. Also, it does not seem that it does not store this XamlType to XamlSchemaContext (Try GetXamlType(xtn) after reading such xaml node, it will return null).
+				xt = new XamlType (ns, name, typeArgs == null ? null : typeArgs.Select<XamlTypeName,XamlType> (xtn => sctx.GetXamlType (xtn)).ToArray (), sctx);
+			types.Push (xt);
+			current = xt;
 
 			if (!r.IsEmptyElement) {
 				r.Read ();
@@ -290,9 +369,11 @@ namespace System.Xaml
 					case XmlNodeType.EndElement:
 						break;
 					default:
-						// this value is for Initialization
-						// FIXME: this could also be a WrappedContents
-						stored_members.Add (new Pair (XamlLanguage.Initialization, r.Value));
+						// this value is for Initialization, or Content property value
+						if (xt.ContentProperty != null)
+							members.Add (new Pair (xt.ContentProperty, r.Value));
+						else
+							members.Add (new Pair (XamlLanguage.Initialization, r.Value));
 						r.Read ();
 						continue;
 					}
@@ -302,32 +383,10 @@ namespace System.Xaml
 			else
 				is_empty_object = true;
 
-			// check TypeArguments to resolve Type, and remove them from the list. They don't appear as a node.
-			foreach (var p in stored_members) {
-				if (p.Key == XamlLanguage.TypeArguments) {
-					typeArgNames = p.Value;
-					stored_members.Remove (p);
-					break;
-				}
-			}
-
-			XamlType xt;
-			IList<XamlTypeName> typeArgs = typeArgNames == null ? null : XamlTypeName.ParseList (typeArgNames, xaml_namespace_resolver);
-			Type rtype = XamlLanguage.ResolveXamlTypeName (ns, name, typeArgs, xaml_namespace_resolver);
-			if (rtype == null)
-				throw new XamlParseException (String.Format ("Cannot resolve runtime namespace from XML namespace '{0}', local name '{1}' and type argument '{2}'", ns, name, typeArgNames));
-			xt = sctx.GetXamlType (rtype);
-			if (xt == null)
-				// FIXME: .NET just treats the node as empty!
-				// we have to sort out what to do here.
-				throw new XamlParseException (String.Format ("Failed to create a XAML type for '{0}' in namespace '{1}'", name, ns));
-			types.Push (xt);
-			current = xt;
-
 			foreach (var p in atts) {
 				var xm = xt.GetMember (p.Key);
 				if (xm != null)
-					stored_members.Add (new Pair (xm, p.Value));
+					members.Add (new Pair (xm, p.Value));
 				// ignore unknown attribute
 			}
 
@@ -335,15 +394,23 @@ namespace System.Xaml
 			inside_object_not_member = true;
 
 			// The next Read() results are likely directives.
-			stored_member_enumerator = stored_members.GetEnumerator ();
+			stored_member_enumerator = members.GetEnumerator ();
 		}
 		
 		void ReadStartMember ()
 		{
 			var name = r.LocalName;
+			int idx = name.IndexOf ('.');
+			if (idx >= 0)
+				name = name.Substring (idx + 1);
 
-			current_member = types.Peek ().GetMember (name);
-			current = current_member;
+			var xt = types.Peek ();
+			var xm = xt.GetMember (name);
+			if (xm == null)
+				// create unknown member.
+				xm = new XamlMember (name, xt, false); // FIXME: not sure if isAttachable is always false.
+			current = current_member = xm;
+			members.Push (xm);
 
 			node_type = XamlNodeType.StartMember;
 			inside_object_not_member = false;
@@ -352,7 +419,11 @@ namespace System.Xaml
 		void ReadEndType ()
 		{
 			r.Read ();
-
+			SetEndOfObject ();
+		}
+		
+		void SetEndOfObject ()
+		{
 			types.Pop ();
 			current = null;
 			node_type = XamlNodeType.EndObject;
@@ -363,7 +434,8 @@ namespace System.Xaml
 		{
 			r.Read ();
 
-			current = current_member = null;
+			current_member = members.Pop ();
+			current = null;
 			node_type = XamlNodeType.EndMember;
 			inside_object_not_member = true;
 		}
@@ -377,11 +449,19 @@ namespace System.Xaml
 
 			node_type = XamlNodeType.Value;
 		}
+		
+		void SetGetObject ()
+		{
+			current = null; // do not clear current_member as it is reused in the next Read().
+			node_type = XamlNodeType.GetObject;
+			inside_object_not_member = true;
+			types.Push (current_member.Type);
+		}
 
 		// returns remaining attributes to be processed
-		Dictionary<string,string> ProcessAttributes ()
+		Dictionary<string,string> ProcessAttributes (List<Pair> members)
 		{
-			var l = stored_members;
+			var l = members;
 
 			// base
 			string xmlbase = r.GetAttribute ("base", XamlLanguage.Xml1998Namespace) ?? r.BaseURI;
@@ -411,7 +491,7 @@ namespace System.Xaml
 			return atts;
 		}
 
-		bool MoveToNextAttributeMember ()
+		bool MoveToNextStoredMember ()
 		{
 			if (stored_member_enumerator != null) {
 				// FIXME: value might have to be deserialized.
@@ -438,16 +518,10 @@ namespace System.Xaml
 				}
 			}
 
-			stored_members.Clear ();
 			stored_member_enumerator = null;
 			return false;
 		}
 		
-		string GetLineString ()
-		{
-			return HasLineInfo ? String.Format (" Line {0}, at {1}", LineNumber, LinePosition) : String.Empty;
-		}
-
 		class NamespaceResolver : IXamlNamespaceResolver
 		{
 			IXmlNamespaceResolver source;

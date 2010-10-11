@@ -250,14 +250,7 @@ namespace System.Net.Sockets {
 					if (sac != null)
 						Socket.socket_pool_queue (sac, worker.result);
 				}
-
-				if (callback != null)
-					ThreadPool.QueueUserWorkItem (CB, null);
-			}
-
-			void CB (object unused)
-			{
-				callback (this);
+				// IMPORTANT: 'callback', if any is scheduled from unmanaged code
 			}
 
 			SocketAsyncCall GetDelegate (Worker worker, SocketOperation op)
@@ -508,6 +501,10 @@ namespace System.Net.Sockets {
 										     result.Size,
 										     result.SockFlags,
 										     out error);
+						if (error != 0) {
+							result.Complete (new SocketException ((int) error));
+							return;
+						}
 					} catch (Exception e) {
 						result.Complete (e);
 						return;
@@ -1767,6 +1764,9 @@ namespace System.Net.Sockets {
 
 			if (result == null)
 				throw new ArgumentNullException ("result");
+
+			if (end_point == null)
+				throw new ArgumentNullException ("remote_end");
 
 			SocketAsyncResult req = result as SocketAsyncResult;
 			if (req == null)

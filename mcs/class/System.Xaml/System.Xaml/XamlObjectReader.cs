@@ -140,7 +140,7 @@ namespace System.Xaml
 				if (!type.IsPublic)
 					throw new XamlObjectReaderException (String.Format ("instance type '{0}' must be public and non-nested.", type));
 				root_type = SchemaContext.GetXamlType (instance.GetType ());
-				if (root_type.ConstructionRequiresArguments && root_type.TypeConverter == null)
+				if (root_type.ConstructionRequiresArguments && !root_type.GetConstructorArguments ().Any () && root_type.TypeConverter == null)
 					throw new XamlObjectReaderException (String.Format ("instance type '{0}' has no default constructor.", type));
 			}
 			else
@@ -161,6 +161,9 @@ namespace System.Xaml
 		IEnumerator<NamespaceDeclaration> ns_iterator;
 		XamlNodeType node_type = XamlNodeType.None;
 		bool is_eof;
+
+		// Unlike object stack, this can be Dictionary, since an there should not be the same object within the stack, and we can just get current stack with "objects" stack.
+		Dictionary<object,IEnumerator<object>> constructor_arguments_stack = new Dictionary<object,IEnumerator<object>> ();
 
 		public virtual object Instance {
 			get { return NodeType == XamlNodeType.StartObject && objects.Count > 0 ? objects.Peek () : null; }
@@ -208,7 +211,9 @@ namespace System.Xaml
 				throw new ObjectDisposedException ("reader");
 			if (IsEof)
 				return false;
+			XamlType type;
 			IEnumerator<XamlMember> members;
+			IEnumerator<object> arguments;
 			switch (NodeType) {
 			case XamlNodeType.None:
 			default:
@@ -236,8 +241,9 @@ namespace System.Xaml
 				return true;
 
 			case XamlNodeType.StartObject:
-				var xt = types.Peek ();
-				members = xt.GetAllReadWriteMembers ().GetEnumerator ();
+				var obj = objects.Peek ();
+				var xt = obj != null ? SchemaContext.GetXamlType (obj.GetType ()) : XamlLanguage.Null;
+				members = xt.GetAllObjectReaderMembers ().GetEnumerator ();
 				if (members.MoveNext ()) {
 					members_stack.Push (members);
 					StartNextMemberOrNamespace ();
@@ -248,10 +254,23 @@ namespace System.Xaml
 				return true;
 
 			case XamlNodeType.StartMember:
-				if (!members_stack.Peek ().Current.IsContentValue ())
+				var curMember = members_stack.Peek ().Current;
+				if (curMember == XamlLanguage.Arguments) {
+					type = types.Peek ();
+					var args = type.GetSortedConstructorArguments ();
+					obj = objects.Peek ();
+					var l = new List<object> ();
+					foreach (var arg in args)
+						l.Add (arg.Invoker.GetValue (obj));
+					arguments = l.GetEnumerator ();
+					constructor_arguments_stack [obj] = arguments;
+					arguments.MoveNext ();
+					StartNextObject (arguments.Current);
+				}
+				else if (!curMember.IsContentValue ())
 					StartNextObject ();
 				else {
-					var obj = GetMemberValueOrRootInstance ();
+					obj = GetMemberValueOrRootInstance ();
 					objects.Push (obj);
 					node_type = XamlNodeType.Value;
 				}
@@ -286,10 +305,20 @@ namespace System.Xaml
 					is_eof = true;
 					return false;
 				}
-				members = members_stack.Peek ();
-				if (members.MoveNext ()) {
-					StartNextMemberOrNamespace ();
-					return true;
+
+				if (constructor_arguments_stack.TryGetValue (objects.Peek (), out arguments)) {
+					if (arguments.MoveNext ()) {
+						StartNextObject (arguments.Current);
+						return true;
+					}
+					// else -> end of Arguments
+					constructor_arguments_stack.Remove (objects.Peek ());
+				} else {
+					members = members_stack.Peek ();
+					if (members.MoveNext ()) {
+						StartNextMemberOrNamespace ();
+						return true;
+					}
 				}
 				// then, move to the end of current object member.
 				node_type = XamlNodeType.EndMember;
@@ -307,7 +336,8 @@ namespace System.Xaml
 				return;
 			}
 			var ns = xt.PreferredXamlNamespace;
-			CheckAddNamespace (d, ns);
+			if (!xt.IsMarkupExtension || xt.TypeConverter == null) // FIXME: not sure why this gives the difference - see XamlObjectReaderTest.Read_CustomMarkupExtension2().
+				CheckAddNamespace (d, ns);
 
 			foreach (var xm in xt.GetAllMembers ()) {
 				ns = xm.PreferredXamlNamespace;
@@ -329,7 +359,11 @@ namespace System.Xaml
 
 		void StartNextObject ()
 		{
-			var obj = GetMemberValueOrRootInstance ();
+			StartNextObject (GetMemberValueOrRootInstance ());
+		}
+
+		void StartNextObject (object obj)
+		{
 			var xt = Object.ReferenceEquals (obj, instance) ? root_type : obj != null ? SchemaContext.GetXamlType (obj.GetType ()) : XamlLanguage.Null;
 
 			// FIXME: enable these lines.
@@ -338,8 +372,13 @@ namespace System.Xaml
 			//if (type.GetConstructor (System.Type.EmptyTypes) == null)
 			//	throw new XamlObjectReaderException (String.Format ("Type {0} has no default constructor or an instance descriptor.", type));
 
-			objects.Push (obj);
 			types.Push (xt);
+
+			// FIXME: I cannot find any reason why it converts the instance like this...
+			//if (xt.TypeConverter != null && xt.TypeConverter.ConverterInstance.CanConvertTo (typeof (string)))
+			//	obj = xt.TypeConverter.ConverterInstance.ConvertTo (obj, typeof (string));
+
+			objects.Push (obj);
 			node_type = XamlNodeType.StartObject;
 		}
 		

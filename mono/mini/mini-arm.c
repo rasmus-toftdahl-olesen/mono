@@ -430,7 +430,7 @@ mono_arch_get_delegate_invoke_impl (MonoMethodSignature *sig, gboolean has_targe
 }
 
 gpointer
-mono_arch_get_this_arg_from_call (MonoGenericSharingContext *gsctx, MonoMethodSignature *sig, mgreg_t *regs, guint8 *code)
+mono_arch_get_this_arg_from_call (mgreg_t *regs, guint8 *code)
 {
 	return (gpointer)regs [ARMREG_R0];
 }
@@ -3792,7 +3792,7 @@ mono_arch_output_basic_block (MonoCompile *cfg, MonoBasicBlock *bb)
 			 */
 			mono_add_patch_info (cfg, offset, MONO_PATCH_INFO_SWITCH, ins->inst_p0);
 			max_len += 4 * GPOINTER_TO_INT (ins->klass);
-			if (offset > (cfg->code_size - max_len - 16)) {
+			if (offset + max_len > (cfg->code_size - 16)) {
 				cfg->code_size += max_len;
 				cfg->code_size *= 2;
 				cfg->native_code = g_realloc (cfg->native_code, cfg->code_size);

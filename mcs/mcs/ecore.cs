@@ -4763,7 +4763,7 @@ namespace Mono.CSharp {
 
 		public void EmitAssign (EmitContext ec, Expression source, bool leave_copy, bool prepare_for_load)
 		{
-			prepared = prepare_for_load;
+			prepared = prepare_for_load && !(source is DynamicExpressionStatement);
 			if (IsInstance)
 				EmitInstance (ec, prepared);
 
@@ -4996,9 +4996,10 @@ namespace Mono.CSharp {
 
 		public override void EmitAssign (EmitContext ec, Expression source, bool leave_copy, bool prepare_for_load)
 		{
-			Expression my_source = source;
+			Arguments args;
 
-			if (prepare_for_load) {
+			if (prepare_for_load && !(source is DynamicExpressionStatement)) {
+				args = new Arguments (0);
 				prepared = true;
 				source.Emit (ec);
 				
@@ -5009,16 +5010,19 @@ namespace Mono.CSharp {
 						temp.Store (ec);
 					}
 				}
-			} else if (leave_copy) {
-				source.Emit (ec);
-				temp = new LocalTemporary (this.Type);
-				temp.Store (ec);
-				my_source = temp;
+			} else {
+				args = new Arguments (1);
+
+				if (leave_copy) {
+					source.Emit (ec);
+					temp = new LocalTemporary (this.Type);
+					temp.Store (ec);
+					args.Add (new Argument (temp));
+				} else {
+					args.Add (new Argument (source));
+				}
 			}
 
-			Arguments args = new Arguments (1);
-			args.Add (new Argument (my_source));
-			
 			Invocation.EmitCall (ec, InstanceExpression, Setter, args, loc, false, prepared);
 			
 			if (temp != null) {
@@ -5261,13 +5265,12 @@ namespace Mono.CSharp {
 		public override MemberExpr ResolveMemberAccess (ResolveContext ec, Expression left, SimpleName original)
 		{
 			//
-			// If the event is local to this class, we transform ourselves into a FieldExpr
+			// If the event is local to this class and we are not lhs of +=/-= we transform ourselves into a FieldExpr
 			//
+			if (!ec.HasSet (ResolveContext.Options.CompoundAssignmentScope)) {
+				if (spec.BackingField != null &&
+					(spec.DeclaringType == ec.CurrentType || TypeManager.IsNestedChildOf (ec.CurrentType, spec.DeclaringType))) {
 
-			if (spec.DeclaringType == ec.CurrentType ||
-			    TypeManager.IsNestedChildOf(ec.CurrentType, spec.DeclaringType)) {
-					
-				if (spec.BackingField != null) {
 					spec.MemberDefinition.SetIsUsed ();
 
 					if (!ec.IsObsolete) {
@@ -5276,19 +5279,18 @@ namespace Mono.CSharp {
 							AttributeTester.Report_ObsoleteMessage (oa, spec.GetSignatureForError (), loc, ec.Report);
 					}
 
-					if ((spec.Modifiers & (Modifiers.ABSTRACT | Modifiers.EXTERN)) != 0 && !ec.HasSet (ResolveContext.Options.CompoundAssignmentScope))
+					if ((spec.Modifiers & (Modifiers.ABSTRACT | Modifiers.EXTERN)) != 0)
 						Error_AssignmentEventOnly (ec);
-					
+
 					FieldExpr ml = new FieldExpr (spec.BackingField, loc);
 
 					InstanceExpression = null;
-				
+
 					return ml.ResolveMemberAccess (ec, left, original);
 				}
-			}
 
-			if (!ec.HasSet (ResolveContext.Options.CompoundAssignmentScope))			
 				Error_AssignmentEventOnly (ec);
+			}
 
 			return base.ResolveMemberAccess (ec, left, original);
 		}
